@@ -2,11 +2,14 @@
 import json
 import math
 import sha3
+import copy 
 
-def evm(code):
+def evm(code, state, block, tx):
     bytestring = code.hex()
     stack = []
     memory = {}
+    storage = {}
+    new_storage = copy.deepcopy(storage)
 
     highest_accessed_memory = 0
 
@@ -15,7 +18,8 @@ def evm(code):
         bytestring = bytestring[2:]
 
         if next_inst == 0:
-            return stack
+            storage = copy.deepcopy(new_storage)
+            return [{}, stack]
 
         elif next_inst == 1:
             result = overflower(stack[0] + stack[1])
@@ -108,20 +112,94 @@ def evm(code):
             stack = [result] + stack[2:]
         
         elif next_inst == int("20", 16):
-            value = [memory[i] if i in memory.keys() else 0 for i in range(stack[0], stack[0] + stack[1])]
+            value = [memory.get(i, 0) for i in range(stack[0], stack[0] + stack[1])]
             if stack[0] + stack[1] > highest_accessed_memory: 
                 highest_accessed_memory = math.ceil((stack[0] + stack[1]) / 32) * 32
             hex_value = "".join([hex(i)[2:].zfill(2) for i in value])
             k = sha3.keccak_256()
             k.update(bytes.fromhex(hex_value))
             stack = [int(k.hexdigest(), 16)] + stack[2:]
-
         
+        elif next_inst == int("30", 16):
+            stack = [int(tx.get("to", 0), 16)] + stack
+
+        elif next_inst == int("31", 16):
+            stack = [int(state.get(hex(stack[0]), {}).get("balance", 0))] + stack[1:]
+
+        elif next_inst == int("32", 16):
+            stack = [int(tx.get("origin", ""), 16)] + stack
+
+        elif next_inst == int("33", 16):
+            stack = [int(tx.get("from", ""), 16)] + stack
+
+        elif next_inst == int("34", 16):
+            stack = [int(tx.get("value", 0))] + stack
+
+        elif next_inst == int("35", 16):
+            stack = [int(tx.get("data", 0)[stack[0]*2:].ljust(64, "0"), 16)] + stack[1:]
+
+        elif next_inst == int("36", 16):
+            stack = [len(str(tx.get("data", 0))) // 2] + stack
+
+        elif next_inst == int("37", 16):
+            value = bytes.fromhex(tx.get("data", "")[stack[1]*2:(stack[1] + stack[2])*2])
+            for i in range(stack[2]):
+                memory[stack[0] + i] = value[i] 
+            if stack[0] + stack[2] > highest_accessed_memory: 
+                highest_accessed_memory = math.ceil(stack[0] + stack[2])
+            stack = stack[3:]
+        
+        elif next_inst == int("38", 16):
+            stack = [len(code.hex()) // 2] + stack
+        
+        elif next_inst == int("39", 16):
+            value = bytes.fromhex(code.hex()[stack[1]*2:(stack[1] + stack[2])*2].ljust(64, "0"))
+            for i in range(stack[2]): memory[stack[0] + i] = value[i] 
+            if stack[0] + stack[2] > highest_accessed_memory: 
+                highest_accessed_memory = math.ceil(stack[0] + stack[2])
+            stack = stack[3:]
+        
+        elif next_inst == int("3A", 16):
+            stack = [int(tx.get("gasprice", 0))] + stack
+        
+        elif next_inst == int("3B", 16):
+            stack = [len(state.get(hex(stack[0]), {}).get("code", {}).get("bin", "")) // 2] + stack[1:]
+
+        elif next_inst == int("3C", 16):
+            [addr, mem_offset, data_offset, size] = stack[:4]
+            extcode = state.get(hex(addr), {}).get("code", {}).get("bin", "")
+            value = bytes.fromhex(extcode[data_offset*2:(data_offset + size)*2].ljust(64, "0"))
+            for i in range(stack[3]): memory[stack[1] + i] = value[i] 
+            if stack[1] + stack[3] > highest_accessed_memory: 
+                highest_accessed_memory = stack[1] + stack[3]
+            stack = stack[4:]
+
+        elif next_inst == int("41", 16):
+            stack = [int(block.get("coinbase", 0), 16)] + stack
+
+        elif next_inst == int("42", 16):
+            stack = [int(block.get("timestamp", 0))] + stack
+        
+        elif next_inst == int("43", 16):
+            stack = [int(block.get("number", 0))] + stack
+
+        elif next_inst == int("44", 16):
+            stack = [int(block.get("difficulty", 0), 16)] + stack
+
+        elif next_inst == int("45", 16):
+            stack = [int(block.get("gaslimit", 0), 16)] + stack
+
+        elif next_inst == int("46", 16):
+            stack = [int(block.get("chainid", 0))] + stack
+
+        elif next_inst == int("47", 16):
+            stack = [int(state.get(hex(int(tx.get("to", 0), 16)), {}).get("balance", 0))] + stack
+
         elif next_inst == int("50", 16):
             stack = stack[1:]
         
         elif next_inst == int("51", 16):
-            value = [memory[i] if i in memory.keys() else 0 for i in range(stack[0], stack[0] + 32)]
+            value = [memory.get(i, 0) for i in range(stack[0], stack[0] + 32)]
             if stack[0] + 32 > highest_accessed_memory: 
                 highest_accessed_memory = math.ceil((stack[0] + 32) / 32) * 32
             hex_value = "".join([hex(i)[2:].zfill(2) for i in value]) + "00" * (32 - len(value))
@@ -142,11 +220,18 @@ def evm(code):
                 highest_accessed_memory = math.ceil((stack[0]) / 32) * 32
             stack = stack[2:]
         
+        elif next_inst == int("54", 16):
+            stack = [new_storage.get(stack[0], 0)] + stack[1:]
+
+        elif next_inst == int("55", 16):
+            [key, value] = stack[:2]
+            new_storage[key] = value
+            stack = stack[2:]
+        
         elif next_inst == int("56", 16):
             bytestring = code.hex()[stack[0] * 2:]
             stack = stack[1:]
             assert(bytestring[:2] == "5b")
-        
 
         elif next_inst == int("57", 16):
             if stack[1] > 0: 
@@ -175,8 +260,41 @@ def evm(code):
             tmp_stack_0 = stack[0]
             stack[0] = stack[position_to_swap]
             stack[position_to_swap] = tmp_stack_0
+        
+        elif next_inst == int("F1", 16):
+            [gas, addr, value, argsOffset, argsSize, retOffset, retSize] = stack[:7]
+            called_code = bytes.fromhex(state.get(hex(addr), {}).get("code", {}).get("bin", ""))
+            tx["from"] = tx.get("to", "")
+            tx["to"] = addr
+            [return_value, _] = evm(called_code, state, block, tx)
+            success = return_value.get("success", False)
+            result = bytes.fromhex(return_value.get("return", "").zfill(retSize * 2))
+
+            if success == "true":
+                stack = [1] + stack[7:]
+            else:
+                stack = [0] + stack[7:]
+            
+            for i in range(retSize):
+                memory[retOffset + i] = result[i] 
+            if retOffset + retSize > highest_accessed_memory: 
+                highest_accessed_memory = retOffset + retSize
+
+        
+        elif next_inst == int("F3", 16):
+            [offset, size] = stack[:2]
+            value = [memory.get(i, 0) for i in range(offset, offset + size)]
+            result = "".join([hex(val)[2:] for val in value])
+            storage = copy.deepcopy(new_storage)
+            return [{"success":"true", "return":result}, stack[2:]]
+        
+        elif next_inst == int("FD", 16):
+            [offset, size] = stack[:2]
+            value = [memory.get(i, 0) for i in range(offset, offset + size)]
+            result = "".join([hex(val)[2:] for val in value])
+            return [{"success":"false", "return":result}, stack[2:]]
     
-    return stack
+    return [{}, stack]
 
 def overflower(i, bits=256):
     return i % 2**bits
@@ -197,14 +315,31 @@ def test():
             # Note: as the test cases get more complex, you'll need to modify this
             # to pass down more arguments to the evm function
             code = bytes.fromhex(test['code']['bin'])
-            stack = evm(code)
+            tx = test.get("tx", {})
+            state = test.get("state", {})
+            block = test.get("block", {})
+            [returned, stack] = evm(code, state, block, tx)
 
-            expected_stack = [int(x, 16) if x.startswith("0x") else int(x) for x in test['expect']['stack']]
+            expected_stack = [int(x, 16) if x.startswith("0x") else int(x) for x in test['expect'].get('stack', [])]
 
             if stack != expected_stack:
                 print("Stack doesn't match")
                 print(" expected:", expected_stack)
                 print("   actual:", stack)
+                print("")
+                print("Test code:")
+                print(test['code']['asm'])
+                print("")
+                print("Progress: " + str(i) + "/" + str(len(data)))
+                print("")
+                break
+        
+            expected_return = test["expect"].get("return", "0x")
+            return_value = returned.get("return", "0x")
+            if return_value != expected_return:
+                print("Return value doesn't match")
+                print(" expected:", expected_return)
+                print("   actual:", return_value)
                 print("")
                 print("Test code:")
                 print(test['code']['asm'])
